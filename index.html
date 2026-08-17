@@ -208,6 +208,7 @@ const CARDS = [
 ];
 const CARD_PURCHASE_CATS = [
   { id:"alimentos", name:"Alimentos", emoji:"🍎" },
+  { id:"comida_fuera_tc", name:"Comidas Fuera de Casa", emoji:"🍽️" },
   { id:"entretencion", name:"Entretención", emoji:"🎟️" },
   { id:"ropa", name:"Ropa", emoji:"👗" },
   { id:"zapatos", name:"Zapatos", emoji:"👟" },
@@ -302,7 +303,7 @@ const uid = () => Math.random().toString(36).slice(2,10)+Date.now().toString(36)
 let state = {
   loading:true,
   expenses:[],
-  settings:{ p1:{name:"Persona 1",day:"18"}, p2:{name:"Persona 2",day:"30"}, savingsGoalPct:20, goalLimits:{} },
+  settings:{ p1:{name:"Persona 1",day:"18"}, p2:{name:"Persona 2",day:"30"}, savingsGoalPct:20, goalLimits:{}, savingsFundGoal:500000 },
   income:{}, // { "2026-07": { p1:123456, p2:654321 }, ... }
   cardExpenses:[], // gastos con tarjetas de crédito — modulo aparte, no afecta el resumen
   tab:"metas",
@@ -310,7 +311,7 @@ let state = {
   form:{ catId:CATS[0].id, subId:CATS[0].subs[0].id, amount:"", date:todayISO(), person:null, note:"", err:"", editingId:null, refund:false },
   txFilterCat:"all",
   txSearchQuery:"",
-  cardForm:{ cardId:CARDS[0].id, catId:CARD_PURCHASE_CATS[0].id, amount:"", cuotas:"1", currentCuota:"1", date:todayISO(), note:"", reembolsable:false, err:"" },
+  cardForm:{ cardId:CARDS[0].id, catId:CARD_PURCHASE_CATS[0].id, amount:"", cuotas:"1", currentCuota:"1", date:todayISO(), note:"", reembolsable:false, err:"", editingId:null },
   cardView:{ cardId:CARDS[0].id, month: monthKey(todayISO()) },
   registrarView:{ month: monthKey(todayISO()) },
   metasView:{ month: monthKey(todayISO()) },
@@ -318,8 +319,12 @@ let state = {
   creditForm:{ name:"", person:null, reason:"", cuotaAmount:"", totalCuotas:"12", currentCuota:"1", date:todayISO(), err:"" },
   creditView:{ month: monthKey(todayISO()) },
   reimbursements:[], // gastos reembolsables por el trabajo — módulo aparte, no afecta registrar/resumen
-  reimburseForm:{ catId:REIMBURSE_CATS[0].id, amount:"", date:todayISO(), note:"", err:"" },
+  reimburseForm:{ catId:REIMBURSE_CATS[0].id, amount:"", date:todayISO(), note:"", err:"", editingId:null },
   reimburseView:{ month: monthKey(todayISO()) },
+  savingsWithdrawals:[], // retiros por emergencia del fondo de ahorro y sus reingresos — módulo aparte
+  withdrawalForm:{ amount:"", date:todayISO(), reason:"", err:"" },
+  returnFormFor:null, // id del retiro al que se le está registrando un reingreso
+  returnForm:{ amount:"", date:todayISO(), note:"", err:"" },
 };
 let weekChart=null, catChart=null, cardCatChart=null, reimburseCatChart=null;
 
@@ -352,7 +357,7 @@ async function cloudSave(data){
 }
 
 function normalizeSettings(s){
-  const base = { p1:{name:"Persona 1",day:"18"}, p2:{name:"Persona 2",day:"30"}, savingsGoalPct:20, goalLimits:{} };
+  const base = { p1:{name:"Persona 1",day:"18"}, p2:{name:"Persona 2",day:"30"}, savingsGoalPct:20, goalLimits:{}, savingsFundGoal:500000 };
   if(!s || typeof s !== "object") s = {};
   const savedLimits = (s.goalLimits && typeof s.goalLimits === "object") ? s.goalLimits : {};
   const goalLimits = {};
@@ -360,11 +365,13 @@ function normalizeSettings(s){
     const v = Number(savedLimits[g.id]);
     goalLimits[g.id] = (!isNaN(v) && v>0) ? v : g.defaultLimit;
   });
+  const fundGoal = Number(s.savingsFundGoal);
   return {
     p1: { name: (s.p1 && s.p1.name) || base.p1.name, day: (s.p1 && s.p1.day) || base.p1.day },
     p2: { name: (s.p2 && s.p2.name) || base.p2.name, day: (s.p2 && s.p2.day) || base.p2.day },
     savingsGoalPct: (typeof s.savingsGoalPct === "number") ? s.savingsGoalPct : base.savingsGoalPct,
     goalLimits,
+    savingsFundGoal: (!isNaN(fundGoal) && fundGoal>0) ? fundGoal : base.savingsFundGoal,
   };
 }
 function normalizeIncome(inc){
@@ -382,6 +389,7 @@ async function loadAll(){
     if(Array.isArray(record.cardExpenses)) state.cardExpenses = record.cardExpenses;
     if(Array.isArray(record.consumerCredits)) state.consumerCredits = record.consumerCredits;
     if(Array.isArray(record.reimbursements)) state.reimbursements = record.reimbursements;
+    if(Array.isArray(record.savingsWithdrawals)) state.savingsWithdrawals = record.savingsWithdrawals;
     state.settings = normalizeSettings(record.settings);
     state.income = normalizeIncome(record.income);
     // Compatibilidad: si venían sueldos fijos de una versión anterior y aún no hay
@@ -392,7 +400,7 @@ async function loadAll(){
     if((oldP1 || oldP2) && !state.income[curMonth]){
       state.income[curMonth] = { p1:Number(oldP1||0), p2:Number(oldP2||0) };
     }
-    lastSavedSnapshot = JSON.stringify({expenses:state.expenses, settings:state.settings, income:state.income, cardExpenses:state.cardExpenses, consumerCredits:state.consumerCredits, reimbursements:state.reimbursements});
+    lastSavedSnapshot = JSON.stringify({expenses:state.expenses, settings:state.settings, income:state.income, cardExpenses:state.cardExpenses, consumerCredits:state.consumerCredits, reimbursements:state.reimbursements, savingsWithdrawals:state.savingsWithdrawals});
     syncStatus = "ok";
   }catch(e){
     syncStatus = "unavailable";
@@ -422,10 +430,10 @@ function persistIncome(next){
   showToast("Sueldos del mes guardados");
   syncToCloud();
 }
-function persistCardExpenses(next){
+function persistCardExpenses(next, msg){
   state.cardExpenses = next;
   render();
-  showToast("Movimiento de tarjeta registrado");
+  showToast(msg || "Movimiento de tarjeta registrado");
   syncToCloud();
 }
 function persistConsumerCredits(next){
@@ -434,18 +442,24 @@ function persistConsumerCredits(next){
   showToast("Crédito actualizado");
   syncToCloud();
 }
-function persistReimbursements(next){
+function persistReimbursements(next, msg){
   state.reimbursements = next;
   render();
-  showToast("Gasto de reembolso registrado");
+  showToast(msg || "Gasto de reembolso registrado");
+  syncToCloud();
+}
+function persistSavingsWithdrawals(next, msg){
+  state.savingsWithdrawals = next;
+  render();
+  showToast(msg || "Ahorro actualizado");
   syncToCloud();
 }
 async function syncToCloud(){
   unsavedChanges = true;
   render();
   try{
-    await cloudSave({ expenses: state.expenses, settings: state.settings, income: state.income, cardExpenses: state.cardExpenses, consumerCredits: state.consumerCredits, reimbursements: state.reimbursements });
-    lastSavedSnapshot = JSON.stringify({expenses:state.expenses, settings:state.settings, income:state.income, cardExpenses:state.cardExpenses, consumerCredits:state.consumerCredits, reimbursements:state.reimbursements});
+    await cloudSave({ expenses: state.expenses, settings: state.settings, income: state.income, cardExpenses: state.cardExpenses, consumerCredits: state.consumerCredits, reimbursements: state.reimbursements, savingsWithdrawals: state.savingsWithdrawals });
+    lastSavedSnapshot = JSON.stringify({expenses:state.expenses, settings:state.settings, income:state.income, cardExpenses:state.cardExpenses, consumerCredits:state.consumerCredits, reimbursements:state.reimbursements, savingsWithdrawals:state.savingsWithdrawals});
     syncStatus = "ok";
     unsavedChanges = false;
   }catch(e){
@@ -463,9 +477,10 @@ async function refreshFromCloud(silent){
     const safeCardExpenses = Array.isArray(record.cardExpenses) ? record.cardExpenses : [];
     const safeConsumerCredits = Array.isArray(record.consumerCredits) ? record.consumerCredits : [];
     const safeReimbursements = Array.isArray(record.reimbursements) ? record.reimbursements : [];
+    const safeSavingsWithdrawals = Array.isArray(record.savingsWithdrawals) ? record.savingsWithdrawals : [];
     const safeSettings = normalizeSettings(record.settings);
     const safeIncome = normalizeIncome(record.income);
-    const incoming = JSON.stringify({expenses:safeExpenses, settings:safeSettings, income:safeIncome, cardExpenses:safeCardExpenses, consumerCredits:safeConsumerCredits, reimbursements:safeReimbursements});
+    const incoming = JSON.stringify({expenses:safeExpenses, settings:safeSettings, income:safeIncome, cardExpenses:safeCardExpenses, consumerCredits:safeConsumerCredits, reimbursements:safeReimbursements, savingsWithdrawals:safeSavingsWithdrawals});
     if(incoming !== lastSavedSnapshot){
       state.expenses = safeExpenses;
       state.settings = safeSettings;
@@ -473,6 +488,7 @@ async function refreshFromCloud(silent){
       state.cardExpenses = safeCardExpenses;
       state.consumerCredits = safeConsumerCredits;
       state.reimbursements = safeReimbursements;
+      state.savingsWithdrawals = safeSavingsWithdrawals;
       lastSavedSnapshot = incoming;
       syncStatus = "ok";
       render();
@@ -602,11 +618,40 @@ function submitCardExpense(e){
   // startMonth = mes en que se cobró la cuota 1, calculado a partir de en qué cuota
   // van a la fecha ingresada (así se puede registrar una compra que ya viene de meses atrás).
   const startMonth = addMonthKey(monthKey(date), -(currentCuota-1));
-  const entry = { id:uid(), card:state.cardForm.cardId, catId, amount, amountMode:"cuota", cuotas, startMonth, date, note, reembolsable };
-  state.cardForm.amount=""; state.cardForm.cuotas="1"; state.cardForm.currentCuota="1"; state.cardForm.note=""; state.cardForm.date=todayISO(); state.cardForm.reembolsable=false;
-  persistCardExpenses([entry, ...state.cardExpenses]);
+  if(state.cardForm.editingId){
+    const editId = state.cardForm.editingId;
+    const next = state.cardExpenses.map(ex => ex.id===editId
+      ? { ...ex, card:state.cardForm.cardId, catId, amount, amountMode:"cuota", cuotas, startMonth, date, note, reembolsable }
+      : ex);
+    state.cardForm.amount=""; state.cardForm.cuotas="1"; state.cardForm.currentCuota="1"; state.cardForm.note=""; state.cardForm.date=todayISO(); state.cardForm.reembolsable=false; state.cardForm.editingId=null;
+    persistCardExpenses(next, "Gasto de tarjeta actualizado");
+  } else {
+    const entry = { id:uid(), card:state.cardForm.cardId, catId, amount, amountMode:"cuota", cuotas, startMonth, date, note, reembolsable };
+    state.cardForm.amount=""; state.cardForm.cuotas="1"; state.cardForm.currentCuota="1"; state.cardForm.note=""; state.cardForm.date=todayISO(); state.cardForm.reembolsable=false;
+    persistCardExpenses([entry, ...state.cardExpenses]);
+  }
 }
-function deleteCardExpense(id){ persistCardExpenses(state.cardExpenses.filter(e=>e.id!==id)); }
+function editCardExpense(id){
+  syncCardFormInputs();
+  const e = state.cardExpenses.find(x=>x.id===id);
+  if(!e) return;
+  const cuotas = Math.max(1, Math.round(Number(e.cuotas))||1);
+  const startMonth = e.startMonth || monthKey(e.date);
+  let currentCuota = monthsBetweenKeys(startMonth, monthKey(e.date)) + 1;
+  currentCuota = Math.min(Math.max(1,currentCuota), cuotas);
+  state.cardForm = { cardId:e.card, catId:e.catId, amount:String(Math.abs(Number(e.amount))), cuotas:String(cuotas), currentCuota:String(currentCuota), date:e.date, note:e.note||"", reembolsable:!!e.reembolsable, err:"", editingId:e.id };
+  render();
+  const formEl = document.querySelector(".form-card");
+  if(formEl) formEl.scrollIntoView({behavior:"smooth", block:"start"});
+}
+function cancelEditCardExpense(){
+  state.cardForm = { cardId:CARDS[0].id, catId:CARD_PURCHASE_CATS[0].id, amount:"", cuotas:"1", currentCuota:"1", date:todayISO(), note:"", reembolsable:false, err:"", editingId:null };
+  render();
+}
+function deleteCardExpense(id){
+  if(state.cardForm.editingId===id) cancelEditCardExpense();
+  persistCardExpenses(state.cardExpenses.filter(e=>e.id!==id), "Gasto de tarjeta eliminado");
+}
 function selectCardView(id){ state.cardView.cardId=id; render(); }
 function shiftCardMonth(delta){ state.cardView.month = addMonthKey(state.cardView.month, delta); render(); }
 function shiftRegistrarMonth(delta){ state.registrarView.month = addMonthKey(state.registrarView.month, delta); render(); }
@@ -658,12 +703,98 @@ function submitReimburse(e){
   if(!amount || amount<=0){ state.reimburseForm.err="Ingresa un monto válido."; render(); return; }
   if(!date){ state.reimburseForm.err="Selecciona una fecha."; render(); return; }
   state.reimburseForm.err="";
-  const entry = { id:uid(), catId:state.reimburseForm.catId, amount, date, note };
-  state.reimburseForm.amount=""; state.reimburseForm.note=""; state.reimburseForm.date=todayISO();
-  persistReimbursements([entry, ...state.reimbursements]);
+  if(state.reimburseForm.editingId){
+    const editId = state.reimburseForm.editingId;
+    const next = state.reimbursements.map(ex => ex.id===editId
+      ? { ...ex, catId:state.reimburseForm.catId, amount, date, note }
+      : ex);
+    state.reimburseForm.amount=""; state.reimburseForm.note=""; state.reimburseForm.date=todayISO(); state.reimburseForm.editingId=null;
+    persistReimbursements(next, "Gasto de reembolso actualizado");
+  } else {
+    const entry = { id:uid(), catId:state.reimburseForm.catId, amount, date, note };
+    state.reimburseForm.amount=""; state.reimburseForm.note=""; state.reimburseForm.date=todayISO();
+    persistReimbursements([entry, ...state.reimbursements]);
+  }
 }
-function deleteReimburse(id){ persistReimbursements(state.reimbursements.filter(e=>e.id!==id)); }
+function editReimburse(id){
+  syncReimburseFormInputs();
+  const e = state.reimbursements.find(x=>x.id===id);
+  if(!e) return;
+  state.reimburseForm = { catId:e.catId, amount:String(Math.abs(Number(e.amount))), date:e.date, note:e.note||"", err:"", editingId:e.id };
+  render();
+  const formEl = document.querySelector(".form-card");
+  if(formEl) formEl.scrollIntoView({behavior:"smooth", block:"start"});
+}
+function cancelEditReimburse(){
+  state.reimburseForm = { catId:REIMBURSE_CATS[0].id, amount:"", date:todayISO(), note:"", err:"", editingId:null };
+  render();
+}
+function deleteReimburse(id){
+  if(state.reimburseForm.editingId===id) cancelEditReimburse();
+  persistReimbursements(state.reimbursements.filter(e=>e.id!==id), "Gasto de reembolso eliminado");
+}
 function shiftReimburseMonth(delta){ state.reimburseView.month = addMonthKey(state.reimburseView.month, delta); render(); }
+
+/* ---- Fondo de ahorro: retiros por emergencia y reingresos ---- */
+function getAhorroAportesTotal(){
+  return state.expenses.filter(e=>e.catId==="ahorro").reduce((s,e)=>s+Number(e.amount),0);
+}
+function getWithdrawalReturned(w){
+  return (w.returns||[]).reduce((s,r)=>s+Number(r.amount),0);
+}
+function getWithdrawalPending(w){
+  return Math.max(0, Number(w.amount) - getWithdrawalReturned(w));
+}
+function getWithdrawalsPendingTotal(){
+  return state.savingsWithdrawals.reduce((s,w)=>s+getWithdrawalPending(w),0);
+}
+function getSavingsFundTotal(){
+  return getAhorroAportesTotal() - getWithdrawalsPendingTotal();
+}
+function saveSavingsGoal(e){
+  e.preventDefault();
+  const next = JSON.parse(JSON.stringify(state.settings));
+  const val = Number(document.getElementById("af-goal").value);
+  next.savingsFundGoal = (!isNaN(val) && val>0) ? val : state.settings.savingsFundGoal;
+  persistSettings(next);
+}
+function submitWithdrawal(e){
+  e.preventDefault();
+  const amount = Number(document.getElementById("wf-amount").value);
+  const date = document.getElementById("wf-date").value;
+  const reason = document.getElementById("wf-reason").value.trim();
+  if(!amount || amount<=0){ state.withdrawalForm.err="Ingresa un monto válido."; render(); return; }
+  if(!date){ state.withdrawalForm.err="Selecciona una fecha."; render(); return; }
+  state.withdrawalForm.err="";
+  const entry = { id:uid(), amount, date, reason, returns:[] };
+  state.withdrawalForm.amount=""; state.withdrawalForm.reason=""; state.withdrawalForm.date=todayISO();
+  persistSavingsWithdrawals([entry, ...state.savingsWithdrawals], "Retiro de emergencia registrado");
+}
+function deleteWithdrawal(id){
+  if(state.returnFormFor===id) state.returnFormFor=null;
+  persistSavingsWithdrawals(state.savingsWithdrawals.filter(w=>w.id!==id), "Retiro eliminado");
+}
+function openReturnForm(id){ state.returnFormFor=id; state.returnForm={amount:"",date:todayISO(),note:"",err:""}; render(); }
+function closeReturnForm(){ state.returnFormFor=null; render(); }
+function submitReturn(e, withdrawalId){
+  e.preventDefault();
+  const amount = Number(document.getElementById("rf-amount").value);
+  const date = document.getElementById("rf-date").value;
+  const note = document.getElementById("rf-note").value.trim();
+  if(!amount || amount<=0){ state.returnForm.err="Ingresa un monto válido."; render(); return; }
+  if(!date){ state.returnForm.err="Selecciona una fecha."; render(); return; }
+  const w = state.savingsWithdrawals.find(x=>x.id===withdrawalId);
+  const pending = w ? getWithdrawalPending(w) : 0;
+  if(amount > pending + 1){ state.returnForm.err = `El reingreso no puede superar lo pendiente (${clp(pending)}).`; render(); return; }
+  state.returnForm.err="";
+  const next = state.savingsWithdrawals.map(x=> x.id===withdrawalId ? {...x, returns:[...(x.returns||[]), {id:uid(), amount, date, note}]} : x);
+  state.returnFormFor=null;
+  persistSavingsWithdrawals(next, "Reingreso registrado");
+}
+function deleteReturn(withdrawalId, returnId){
+  const next = state.savingsWithdrawals.map(w=> w.id===withdrawalId ? {...w, returns:(w.returns||[]).filter(r=>r.id!==returnId)} : w);
+  persistSavingsWithdrawals(next, "Reingreso eliminado");
+}
 
 function updateConfigField(key1,key2,value){
   const next = JSON.parse(JSON.stringify(state.settings));
@@ -904,7 +1035,7 @@ function render(){
   if(state.loading){ app.innerHTML = `<div style="min-height:400px;display:flex;align-items:center;justify-content:center;color:${MUTED};font-size:14px;">Cargando cuaderno de cuentas…</div>`; return; }
 
   app.innerHTML = renderHeader() + renderExcelBar() + renderTabs() +
-    `<div id="tab-content">${state.tab==="metas"?renderMetas():state.tab==="registrar"?renderRegistrar():state.tab==="resumen"?renderResumen():state.tab==="tarjetas"?renderTarjetas():state.tab==="creditos_consumo"?renderCreditosConsumo():state.tab==="reembolso"?renderReembolso():renderConfig()}</div>`;
+    `<div id="tab-content">${state.tab==="metas"?renderMetas():state.tab==="registrar"?renderRegistrar():state.tab==="resumen"?renderResumen():state.tab==="tarjetas"?renderTarjetas():state.tab==="creditos_consumo"?renderCreditosConsumo():state.tab==="reembolso"?renderReembolso():state.tab==="ahorro_fondo"?renderAhorroFondo():renderConfig()}</div>`;
 
   if(state.tab==="resumen") drawCharts();
   if(state.tab==="tarjetas") drawCardChart();
@@ -1007,7 +1138,7 @@ function renderExcelBar(){
 }
 
 function renderTabs(){
-  const tabs=[["metas","🎯 Metas"],["registrar","＋ Registrar"],["resumen","📈 Resumen"],["tarjetas","💳 Tarjetas"],["creditos_consumo","🏦 Créditos"],["reembolso","🧾 Reembolso"],["config","⚙ Configuración"]];
+  const tabs=[["ahorro_fondo","🐷 Ahorro"],["metas","🎯 Metas"],["registrar","＋ Registrar"],["resumen","📈 Resumen"],["tarjetas","💳 Tarjetas"],["creditos_consumo","🏦 Créditos"],["reembolso","🧾 Reembolso"],["config","⚙ Configuración"]];
   return `<div class="tabnav">${tabs.map(([id,label])=>`<button class="${state.tab===id?"active":""}" onclick="setTab('${id}')">${label}</button>`).join("")}</div>`;
 }
 
@@ -1179,21 +1310,56 @@ function renderRegistrar(){
 }
 
 const GOAL_DEFS = [
-  { id:"mascotas", catId:"mascotas", subIds:null, label:"Mascotas", emoji:"🐾", defaultLimit:155000 },
-  { id:"bencina", catId:"auto", subIds:["bencina"], label:"Bencina", emoji:"⛽", defaultLimit:245000 },
-  { id:"comida_fuera", catId:"ocio", subIds:["comida_fuera"], label:"Comidas Fuera de Casa", emoji:"🍽️", defaultLimit:50000 },
-  { id:"basicos", catId:"basicos", subIds:["agua","luz","gas","telefonia","internet"], label:"Gastos Básicos (luz, agua, gas, teléfono, internet)", emoji:"⚡", defaultLimit:110000 },
-  { id:"estacionamiento", catId:"reembolsables", subIds:["estacionamientos"], label:"Estacionamiento", emoji:"🅿️", defaultLimit:82000 },
+  { id:"mascotas", label:"Mascotas", emoji:"🐾", defaultLimit:155000,
+    sources:[
+      { type:"expenses", catId:"mascotas", subIds:null },
+      { type:"cardExpenses", catId:"mascotas_tc" },
+    ] },
+  { id:"bencina", label:"Bencina", emoji:"⛽", defaultLimit:245000,
+    sources:[
+      { type:"reimbursements", catId:"bencina" },
+    ] },
+  { id:"comida_fuera", label:"Comidas Fuera de Casa", emoji:"🍽️", defaultLimit:50000,
+    sources:[
+      { type:"expenses", catId:"ocio", subIds:["comida_fuera"] },
+      { type:"cardExpenses", catId:"comida_fuera_tc" },
+    ] },
+  { id:"basicos", label:"Gastos Básicos (luz, agua, gas, teléfono, internet)", emoji:"⚡", defaultLimit:110000,
+    sources:[
+      { type:"expenses", catId:"basicos", subIds:["agua","luz","gas","telefonia","internet"] },
+    ] },
+  { id:"estacionamiento", label:"Estacionamiento", emoji:"🅿️", defaultLimit:82000,
+    sources:[
+      { type:"reimbursements", catId:"estacionamiento" },
+    ] },
 ];
 
 function getGoals(){
   return GOAL_DEFS.map(g=>({ ...g, monthlyLimit: Number(state.settings.goalLimits?.[g.id]) || g.defaultLimit }));
 }
 
+// Cada meta puede sumar plata desde distintos módulos (Registrar, Reembolso, Tarjetas).
+// "reimbursements" toma solo lo registrado en la pestaña Reembolso (no lo de Registrar).
+// "cardExpenses" respeta las cuotas: solo suma la cuota que está activa ese mes.
 function goalSpent(g, mKey){
-  return state.expenses
-    .filter(e=>monthKey(e.date)===mKey && e.catId===g.catId && (g.subIds===null || g.subIds.includes(e.subId)) && e.amount>0)
-    .reduce((s,e)=>s+Number(e.amount),0);
+  return (g.sources||[]).reduce((total, src)=>{
+    if(src.type==="expenses"){
+      return total + state.expenses
+        .filter(e=>monthKey(e.date)===mKey && e.catId===src.catId && (src.subIds==null || src.subIds.includes(e.subId)) && e.amount>0)
+        .reduce((s,e)=>s+Number(e.amount),0);
+    }
+    if(src.type==="reimbursements"){
+      return total + state.reimbursements
+        .filter(e=>monthKey(e.date)===mKey && e.catId===src.catId)
+        .reduce((s,e)=>s+Number(e.amount),0);
+    }
+    if(src.type==="cardExpenses"){
+      return total + state.cardExpenses
+        .filter(e=>e.catId===src.catId)
+        .reduce((s,e)=>{ const info=getCuotaInfo(e, mKey); return info ? s+info.cuotaAmount : s; }, 0);
+    }
+    return total;
+  }, 0);
 }
 
 const GOAL_TIPS = {
@@ -1395,13 +1561,15 @@ function renderTarjetas(){
         const pc = findPurchaseCat(e.catId);
         const cuotaTag = e.cuotaTotal>1 ? ` · Cuota ${e.cuotaIdx+1}/${e.cuotaTotal}` : "";
         const reembolsoTag = e.reembolsable ? ` <span style="color:${SAGE};font-weight:700;">· ↩️ reembolsable</span>` : "";
-        return `<div class="tx-row">
+        const isEditing = e.id===state.cardForm.editingId;
+        return `<div class="tx-row" style="${isEditing?`background:${GOLD}1c;`:""}">
           <div class="tx-icon" style="background:${viewCard.color}22;color:${viewCard.color};">${pc?.emoji||"💳"}</div>
           <div style="min-width:0;flex:1;">
             <div class="tx-name">${pc?.name||"Gasto"}</div>
             <div class="tx-sub">${new Date(e.date+"T00:00:00").toLocaleDateString("es-CL",{day:"2-digit",month:"short"})}${cuotaTag}${e.note?` · ${e.note}`:""}${reembolsoTag}</div>
           </div>
           <div class="tx-amount">${clp(e.cuotaAmount)}</div>
+          <button class="tx-del" onclick="editCardExpense('${e.id}')" title="Editar" style="opacity:.5;">✎</button>
           <button class="tx-del" onclick="deleteCardExpense('${e.id}')" title="Eliminar">✕</button>
         </div>`;
       }).join("");
@@ -1422,7 +1590,7 @@ function renderTarjetas(){
 
   <div class="grid-registrar">
     <form class="card form-card" onsubmit="submitCardExpense(event)">
-      <h2 class="ff-display" style="font-size:18px;font-weight:600;margin-bottom:16px;">Nuevo gasto con tarjeta</h2>
+      <h2 class="ff-display" style="font-size:18px;font-weight:600;margin-bottom:16px;">${state.cardForm.editingId?"✎ Editar gasto con tarjeta":"Nuevo gasto con tarjeta"}</h2>
 
       <label class="field-label">Tarjeta</label>
       <div class="person-row" style="flex-wrap:wrap;">${cardFormButtons}</div>
@@ -1463,7 +1631,12 @@ function renderTarjetas(){
 
       ${state.cardForm.err?`<p class="err-text">${state.cardForm.err}</p>`:""}
 
-      <button type="submit" class="submit-btn" style="background:${activeCard.color};">＋ Guardar gasto</button>
+      ${state.cardForm.editingId
+        ? `<div style="display:flex;gap:10px;">
+             <button type="submit" class="submit-btn" style="flex:1;background:${activeCard.color};">✓ Guardar cambios</button>
+             <button type="button" class="submit-btn" style="flex:none;background:var(--track);color:var(--ink);" onclick="cancelEditCardExpense()">Cancelar</button>
+           </div>`
+        : `<button type="submit" class="submit-btn" style="background:${activeCard.color};">＋ Guardar gasto</button>`}
 
       <div class="tips-card" style="margin-top:20px;">
         <h3 class="tips-title">✨ Tips para ${viewCard.name}</h3>
@@ -1681,6 +1854,124 @@ function renderGoalCard(catId, goalAmount, spentThisMonth){
   </div>`;
 }
 
+function renderAhorroFondo(){
+  const aportesTotal = getAhorroAportesTotal();
+  const withdrawalsPending = getWithdrawalsPendingTotal();
+  const fundTotal = getSavingsFundTotal();
+  const goal = Number(state.settings.savingsFundGoal)||0;
+  const pct = goal>0 ? Math.min(100,(fundTotal/goal)*100) : 0;
+  const reached = goal>0 && fundTotal>=goal;
+  const barColor = reached ? SAGE : (pct>=50 ? GOLD : CORAL);
+  const fmtDate = d => new Date(d+"T00:00:00").toLocaleDateString("es-CL",{day:"2-digit",month:"long",year:"numeric"});
+
+  const withdrawalsHtml = state.savingsWithdrawals.length===0
+    ? `<div class="empty-box">Aún no registras retiros de emergencia. Ojalá nunca los necesites 🤞</div>`
+    : state.savingsWithdrawals.map(w=>{
+        const returned = getWithdrawalReturned(w);
+        const pending = getWithdrawalPending(w);
+        const done = pending<=0.01;
+        const wPct = Number(w.amount)>0 ? Math.min(100,(returned/Number(w.amount))*100) : 100;
+        const returnsHtml = (w.returns||[]).length ? `<div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;">${w.returns.map(r=>`
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:${MUTED};background:${SAGE}12;border-radius:8px;padding:5px 8px;">
+            <span>↩️ ${clp(r.amount)} el ${fmtDate(r.date)}${r.note?` · ${r.note}`:""}</span>
+            <button class="tx-del" style="padding:2px 4px;" onclick="deleteReturn('${w.id}','${r.id}')" title="Eliminar">✕</button>
+          </div>`).join("")}</div>` : "";
+        const returnFormHtml = state.returnFormFor===w.id ? `
+          <form onsubmit="submitReturn(event,'${w.id}')" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+              <div>
+                <label class="field-label">Monto del reingreso</label>
+                <input id="rf-amount" type="number" min="0" step="1" class="field ff-mono" placeholder="0" value="${state.returnForm.amount}">
+              </div>
+              <div>
+                <label class="field-label">Fecha</label>
+                <input id="rf-date" type="date" class="field" value="${state.returnForm.date}">
+              </div>
+            </div>
+            <label class="field-label">Nota (opcional)</label>
+            <input id="rf-note" type="text" class="field" placeholder="Ej: primera parte" value="${state.returnForm.note}">
+            ${state.returnForm.err?`<p class="err-text">${state.returnForm.err}</p>`:""}
+            <div style="display:flex;gap:8px;">
+              <button type="submit" class="submit-btn" style="background:${SAGE};width:auto;padding:11px 18px;">✓ Guardar reingreso</button>
+              <button type="button" class="submit-btn" style="background:${MUTED};width:auto;padding:11px 18px;" onclick="closeReturnForm()">Cancelar</button>
+            </div>
+          </form>` : `<button type="button" class="submit-btn" style="margin-top:10px;background:${STEEL};width:auto;padding:11px 18px;" onclick="openReturnForm('${w.id}')">↩️ Registrar reingreso</button>`;
+        return `<div class="card" style="padding:16px;margin-bottom:14px;${done?`border-color:${SAGE};`:""}">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+            <div>
+              <div style="font-weight:700;font-size:15px;">${clp(w.amount)}${w.reason?` · ${w.reason}`:""}</div>
+              <div style="font-size:12px;color:${MUTED};">${fmtDate(w.date)}</div>
+            </div>
+            <button class="tx-del" onclick="deleteWithdrawal('${w.id}')" title="Eliminar">✕</button>
+          </div>
+          <div style="height:10px;border-radius:999px;background:var(--track);overflow:hidden;margin-bottom:8px;">
+            <div style="height:100%;width:${wPct}%;border-radius:999px;background:${done?SAGE:STEEL};"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;font-size:13px;">
+            <span>${done?"Devuelto completo ✅":`Devuelto ${clp(returned)} de ${clp(w.amount)}`}</span>
+            ${!done?`<span class="ff-mono" style="font-weight:700;color:${CORAL};">Pendiente: ${clp(pending)}</span>`:""}
+          </div>
+          ${returnsHtml}
+          ${!done?returnFormHtml:""}
+        </div>`;
+      }).join("");
+
+  return `
+  <div class="card" style="padding:12px 18px;margin-bottom:18px;background:${INK};color:#FFF6EF;">
+    <p style="font-size:13px;margin:0;">🐷 El fondo de ahorro suma todo lo que registras en Registrar → Ahorro. Aquí fijas tu meta, ves el progreso, y llevas la cuenta de los retiros por emergencia y sus reingresos.</p>
+  </div>
+
+  <div class="card" style="padding:20px;margin-bottom:20px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+      <h2 class="ff-display" style="font-size:18px;font-weight:600;">Fondo de ahorro</h2>
+      <span class="ff-mono" style="font-size:20px;font-weight:800;color:${reached?SAGE:INK};">${clp(fundTotal)}</span>
+    </div>
+    <div style="height:16px;border-radius:999px;background:var(--track);overflow:hidden;margin-bottom:8px;">
+      <div style="height:100%;width:${pct}%;border-radius:999px;background:${barColor};transition:width .3s;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;font-size:13px;color:${MUTED};margin-bottom:16px;">
+      <span>${goal>0?`${pct.toFixed(0)}% de la meta`:"Define una meta abajo"}</span>
+      <span>Meta: ${clp(goal)}</span>
+    </div>
+    ${reached?`<p style="margin:0 0 14px;font-size:13px;font-weight:700;color:${SAGE};">🎉 ¡Llegaste a tu meta de ahorro!</p>`:""}
+    <p style="margin:0 0 16px;font-size:12px;color:${MUTED};">Aportes acumulados: ${clp(aportesTotal)}${withdrawalsPending>0?` · Retiros pendientes de devolver: ${clp(withdrawalsPending)}`:""}</p>
+
+    <form onsubmit="saveSavingsGoal(event)" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+      <div style="flex:1;min-width:160px;">
+        <label class="field-label">Meta del fondo de ahorro</label>
+        <input id="af-goal" type="number" min="0" step="1" class="field ff-mono" value="${goal}">
+      </div>
+      <button type="submit" class="submit-btn" style="background:${PLUM};width:auto;padding:12px 20px;">Guardar meta</button>
+    </form>
+  </div>
+
+  <div class="grid-registrar">
+    <form class="card form-card" onsubmit="submitWithdrawal(event)">
+      <h2 class="ff-display" style="font-size:18px;font-weight:600;margin-bottom:16px;">Registrar retiro por emergencia</h2>
+
+      <label class="field-label">Monto del retiro</label>
+      <input id="wf-amount" type="number" min="0" step="1" class="field ff-mono" placeholder="0" value="${state.withdrawalForm.amount}">
+
+      <label class="field-label">Fecha</label>
+      <input id="wf-date" type="date" class="field" value="${state.withdrawalForm.date}">
+
+      <label class="field-label">Motivo (opcional)</label>
+      <input id="wf-reason" type="text" class="field" placeholder="Ej: reparación urgente del auto" value="${state.withdrawalForm.reason}">
+
+      <p class="hint-text" style="margin-top:-6px;">Disponible en el fondo: ${clp(fundTotal)}</p>
+
+      ${state.withdrawalForm.err?`<p class="err-text">${state.withdrawalForm.err}</p>`:""}
+
+      <button type="submit" class="submit-btn" style="background:${CORAL};">🚨 Guardar retiro</button>
+    </form>
+
+    <div>
+      <h2 class="ff-display" style="font-size:18px;font-weight:600;margin-bottom:12px;">Retiros registrados</h2>
+      ${withdrawalsHtml}
+    </div>
+  </div>`;
+}
+
 function renderReembolso(){
   const catButtons = REIMBURSE_CATS.map(c=>`
     <button type="button" class="cat-btn ${c.id===state.reimburseForm.catId?"active":""}"
@@ -1708,13 +1999,15 @@ function renderReembolso(){
     ? `<div class="empty-box">Sin gastos de reembolso registrados en ${fmtMonth(state.reimburseView.month)}.</div>`
     : sortedMovs.map(e=>{
         const c = findReimburseCat(e.catId);
-        return `<div class="tx-row">
+        const isEditing = e.id===state.reimburseForm.editingId;
+        return `<div class="tx-row" style="${isEditing?`background:${GOLD}1c;`:""}">
           <div class="tx-icon" style="background:${PEACH}22;color:${PEACH};">${c?.emoji||"🧾"}</div>
           <div style="min-width:0;flex:1;">
             <div class="tx-name">${c?.name||"Gasto"}</div>
             <div class="tx-sub">${new Date(e.date+"T00:00:00").toLocaleDateString("es-CL",{day:"2-digit",month:"short"})}${e.note?` · ${e.note}`:""}</div>
           </div>
           <div class="tx-amount">${clp(e.amount)}</div>
+          <button class="tx-del" onclick="editReimburse('${e.id}')" title="Editar" style="opacity:.5;">✎</button>
           <button class="tx-del" onclick="deleteReimburse('${e.id}')" title="Eliminar">✕</button>
         </div>`;
       }).join("");
@@ -1728,7 +2021,7 @@ function renderReembolso(){
 
   <div class="grid-registrar">
     <form class="card form-card" onsubmit="submitReimburse(event)">
-      <h2 class="ff-display" style="font-size:18px;font-weight:600;margin-bottom:16px;">Nuevo gasto de reembolso</h2>
+      <h2 class="ff-display" style="font-size:18px;font-weight:600;margin-bottom:16px;">${state.reimburseForm.editingId?"✎ Editar gasto de reembolso":"Nuevo gasto de reembolso"}</h2>
 
       <label class="field-label">Categoría</label>
       <div class="cat-grid">${catButtons}</div>
@@ -1749,7 +2042,12 @@ function renderReembolso(){
 
       ${state.reimburseForm.err?`<p class="err-text">${state.reimburseForm.err}</p>`:""}
 
-      <button type="submit" class="submit-btn" style="background:${PEACH};">＋ Guardar gasto</button>
+      ${state.reimburseForm.editingId
+        ? `<div style="display:flex;gap:10px;">
+             <button type="submit" class="submit-btn" style="flex:1;background:${PEACH};">✓ Guardar cambios</button>
+             <button type="button" class="submit-btn" style="flex:none;background:var(--track);color:var(--ink);" onclick="cancelEditReimburse()">Cancelar</button>
+           </div>`
+        : `<button type="submit" class="submit-btn" style="background:${PEACH};">＋ Guardar gasto</button>`}
 
       <div style="margin-top:20px;">
         <h3 class="ff-display" style="font-size:16px;font-weight:600;margin-bottom:10px;">🎯 Metas del mes</h3>
