@@ -202,9 +202,9 @@ const findSub = (catId,subId) => findCat(catId)?.subs.find(s=>s.id===subId);
    Estos gastos se guardan y muestran aparte; NUNCA se suman al gasto del hogar,
    al ahorro, ni al carril de la quincena. Es solo para trazabilidad. */
 const CARDS = [
-  { id:"cmr", name:"Tarjeta CMR", color:"#F2986B" },
-  { id:"cenco", name:"Tarjeta Cencosud", color:"#5FA8D3" },
-  { id:"bancochile", name:"Tarjeta Banco de Chile", color:"#8E7CC3" },
+  { id:"cmr", name:"Tarjeta CMR", color:"#F2986B", defaultCutoffDay:20 },
+  { id:"cenco", name:"Tarjeta Cencosud", color:"#5FA8D3", defaultCutoffDay:20 },
+  { id:"bancochile", name:"Tarjeta Banco de Chile", color:"#8E7CC3", defaultCutoffDay:20 },
 ];
 const CARD_PURCHASE_CATS = [
   { id:"alimentos", name:"Alimentos", emoji:"🍎" },
@@ -224,6 +224,20 @@ const CARD_PURCHASE_CATS = [
 ];
 const findCard = id => CARDS.find(c=>c.id===id);
 const findPurchaseCat = id => CARD_PURCHASE_CATS.find(c=>c.id===id);
+// Día de corte/facturación de cada tarjeta: las compras hechas DESPUÉS de ese día
+// caen en la boleta del mes siguiente, no en la del mes en que se compró.
+function getCardCutoffDay(cardId){
+  const v = Number(state.settings?.cardCutoffDays?.[cardId]);
+  if(!isNaN(v) && v>=1 && v<=31) return v;
+  const c = findCard(cardId);
+  return c ? c.defaultCutoffDay : 20;
+}
+function billingMonthForDate(cardId, dateStr){
+  const day = Number(dateStr.slice(8,10));
+  const cutoff = getCardCutoffDay(cardId);
+  const mk = monthKey(dateStr);
+  return day > cutoff ? addMonthKey(mk, 1) : mk;
+}
 
 /* ================= Reembolso por trabajo (módulo independiente) =================
    Gastos que siempre son reembolsables por el empleador. Aparte de todo lo demás. */
@@ -303,7 +317,7 @@ const uid = () => Math.random().toString(36).slice(2,10)+Date.now().toString(36)
 let state = {
   loading:true,
   expenses:[],
-  settings:{ p1:{name:"Persona 1",day:"18"}, p2:{name:"Persona 2",day:"30"}, savingsGoalPct:20, goalLimits:{}, savingsFundGoal:500000 },
+  settings:{ p1:{name:"Persona 1",day:"18"}, p2:{name:"Persona 2",day:"30"}, savingsGoalPct:20, goalLimits:{}, savingsFundGoal:500000, cardCutoffDays:{} },
   income:{}, // { "2026-07": { p1:123456, p2:654321 }, ... }
   cardExpenses:[], // gastos con tarjetas de crédito — modulo aparte, no afecta el resumen
   tab:"metas",
@@ -357,7 +371,7 @@ async function cloudSave(data){
 }
 
 function normalizeSettings(s){
-  const base = { p1:{name:"Persona 1",day:"18"}, p2:{name:"Persona 2",day:"30"}, savingsGoalPct:20, goalLimits:{}, savingsFundGoal:500000 };
+  const base = { p1:{name:"Persona 1",day:"18"}, p2:{name:"Persona 2",day:"30"}, savingsGoalPct:20, goalLimits:{}, savingsFundGoal:500000, cardCutoffDays:{} };
   if(!s || typeof s !== "object") s = {};
   const savedLimits = (s.goalLimits && typeof s.goalLimits === "object") ? s.goalLimits : {};
   const goalLimits = {};
@@ -366,12 +380,19 @@ function normalizeSettings(s){
     goalLimits[g.id] = (!isNaN(v) && v>0) ? v : g.defaultLimit;
   });
   const fundGoal = Number(s.savingsFundGoal);
+  const savedCutoffs = (s.cardCutoffDays && typeof s.cardCutoffDays === "object") ? s.cardCutoffDays : {};
+  const cardCutoffDays = {};
+  CARDS.forEach(c=>{
+    const v = Math.round(Number(savedCutoffs[c.id]));
+    cardCutoffDays[c.id] = (!isNaN(v) && v>=1 && v<=31) ? v : c.defaultCutoffDay;
+  });
   return {
     p1: { name: (s.p1 && s.p1.name) || base.p1.name, day: (s.p1 && s.p1.day) || base.p1.day },
     p2: { name: (s.p2 && s.p2.name) || base.p2.name, day: (s.p2 && s.p2.day) || base.p2.day },
     savingsGoalPct: (typeof s.savingsGoalPct === "number") ? s.savingsGoalPct : base.savingsGoalPct,
     goalLimits,
     savingsFundGoal: (!isNaN(fundGoal) && fundGoal>0) ? fundGoal : base.savingsFundGoal,
+    cardCutoffDays,
   };
 }
 function normalizeIncome(inc){
@@ -597,10 +618,16 @@ function updateCuotaPreview(){
   const cuotas = Math.max(1, Math.round(Number(document.getElementById("cf-cuotas")?.value)||1));
   let current = Math.round(Number(document.getElementById("cf-cuota-actual")?.value)||1);
   current = Math.min(Math.max(1,current), cuotas);
+  const dateVal = document.getElementById("cf-date")?.value;
   const el = document.getElementById("cf-preview");
   if(!el) return;
-  if(cuotas<=1){ el.textContent = amt>0 ? `Pago único de ${clp(amt)}` : "Pago único"; return; }
-  el.textContent = amt>0 ? `Cuota ${current} de ${cuotas} · ${clp(amt)} este mes` : `Cuota ${current} de ${cuotas}`;
+  let billingTxt = "";
+  if(dateVal){
+    const billingMonth = billingMonthForDate(state.cardForm.cardId, dateVal);
+    billingTxt = ` · se factura en ${fmtMonth(billingMonth)}`;
+  }
+  if(cuotas<=1){ el.textContent = (amt>0 ? `Pago único de ${clp(amt)}` : "Pago único") + billingTxt; return; }
+  el.textContent = (amt>0 ? `Cuota ${current} de ${cuotas} · ${clp(amt)} este mes` : `Cuota ${current} de ${cuotas}`) + billingTxt;
 }
 function submitCardExpense(e){
   e.preventDefault();
@@ -615,9 +642,10 @@ function submitCardExpense(e){
   if(!amount || amount<=0){ state.cardForm.err="Ingresa un monto válido."; render(); return; }
   if(!date){ state.cardForm.err="Selecciona una fecha."; render(); return; }
   state.cardForm.err="";
-  // startMonth = mes en que se cobró la cuota 1, calculado a partir de en qué cuota
-  // van a la fecha ingresada (así se puede registrar una compra que ya viene de meses atrás).
-  const startMonth = addMonthKey(monthKey(date), -(currentCuota-1));
+  // startMonth = mes de FACTURACIÓN en que cae la cuota 1 (según el día de corte de la
+  // tarjeta), no necesariamente el mes calendario de la fecha de compra ingresada.
+  const billingMonth = billingMonthForDate(state.cardForm.cardId, date);
+  const startMonth = addMonthKey(billingMonth, -(currentCuota-1));
   if(state.cardForm.editingId){
     const editId = state.cardForm.editingId;
     const next = state.cardExpenses.map(ex => ex.id===editId
@@ -637,7 +665,7 @@ function editCardExpense(id){
   if(!e) return;
   const cuotas = Math.max(1, Math.round(Number(e.cuotas))||1);
   const startMonth = e.startMonth || monthKey(e.date);
-  let currentCuota = monthsBetweenKeys(startMonth, monthKey(e.date)) + 1;
+  let currentCuota = monthsBetweenKeys(startMonth, billingMonthForDate(e.card, e.date)) + 1;
   currentCuota = Math.min(Math.max(1,currentCuota), cuotas);
   state.cardForm = { cardId:e.card, catId:e.catId, amount:String(Math.abs(Number(e.amount))), cuotas:String(cuotas), currentCuota:String(currentCuota), date:e.date, note:e.note||"", reembolsable:!!e.reembolsable, err:"", editingId:e.id };
   render();
@@ -818,6 +846,16 @@ function saveGoalLimits(e){
   GOAL_DEFS.forEach(g=>{
     const val = Number(document.getElementById("goal-"+g.id).value);
     next.goalLimits[g.id] = (!isNaN(val) && val>0) ? val : g.defaultLimit;
+  });
+  persistSettings(next);
+}
+function saveCardCutoffs(e){
+  e.preventDefault();
+  const next = JSON.parse(JSON.stringify(state.settings));
+  next.cardCutoffDays = next.cardCutoffDays || {};
+  CARDS.forEach(c=>{
+    const val = Math.round(Number(document.getElementById("cutoff-"+c.id).value));
+    next.cardCutoffDays[c.id] = (!isNaN(val) && val>=1 && val<=31) ? val : c.defaultCutoffDay;
   });
   persistSettings(next);
 }
@@ -1332,6 +1370,10 @@ const GOAL_DEFS = [
     sources:[
       { type:"reimbursements", catId:"estacionamiento" },
     ] },
+  { id:"reembolso_total", label:"Reembolso", emoji:"🧾", defaultLimit:330000,
+    sources:[
+      { type:"reimbursements" },
+    ] },
 ];
 
 function getGoals(){
@@ -1350,7 +1392,7 @@ function goalSpent(g, mKey){
     }
     if(src.type==="reimbursements"){
       return total + state.reimbursements
-        .filter(e=>monthKey(e.date)===mKey && e.catId===src.catId)
+        .filter(e=>monthKey(e.date)===mKey && (src.catId==null || e.catId===src.catId))
         .reduce((s,e)=>s+Number(e.amount),0);
     }
     if(src.type==="cardExpenses"){
@@ -1579,9 +1621,11 @@ function renderTarjetas(){
   const cuotasNum = Math.max(1, Math.round(Number(state.cardForm.cuotas)||1));
   const currentCuotaNum = Math.min(Math.max(1, Math.round(Number(state.cardForm.currentCuota)||1)), cuotasNum);
   const amountNum = Number(state.cardForm.amount)||0;
-  const cuotaPreview = cuotasNum>1
+  const formBillingMonth = state.cardForm.date ? billingMonthForDate(state.cardForm.cardId, state.cardForm.date) : null;
+  const formBillingTxt = formBillingMonth ? ` · se factura en ${fmtMonth(formBillingMonth)}` : "";
+  const cuotaPreview = (cuotasNum>1
     ? `Cuota ${currentCuotaNum} de ${cuotasNum}${amountNum>0?` · ${clp(amountNum)} este mes`:""}`
-    : (amountNum>0 ? `Pago único de ${clp(amountNum)}` : "Pago único");
+    : (amountNum>0 ? `Pago único de ${clp(amountNum)}` : "Pago único")) + formBillingTxt;
 
   return `
   <div class="card" style="padding:12px 18px;margin-bottom:18px;background:${INK};color:#FFF6EF;">
@@ -1615,8 +1659,8 @@ function renderTarjetas(){
           <input id="cf-cuota-actual" type="number" min="1" step="1" class="field ff-mono" value="${state.cardForm.currentCuota}" oninput="updateCuotaPreview()">
         </div>
         <div>
-          <label class="field-label">Fecha de esa cuota</label>
-          <input id="cf-date" type="date" class="field" value="${state.cardForm.date}" onchange="syncCardFormInputs()">
+          <label class="field-label">Fecha de la compra (o de esa cuota)</label>
+          <input id="cf-date" type="date" class="field" value="${state.cardForm.date}" onchange="syncCardFormInputs(); updateCuotaPreview();">
         </div>
       </div>
       <p class="hint-text" id="cf-preview" style="margin:-10px 0 16px;">${cuotaPreview}</p>
@@ -2285,6 +2329,23 @@ function renderConfig(){
     </div>
 
     <button type="submit" class="submit-btn" style="width:auto;padding:11px 22px;">Guardar metas</button>
+  </form>
+
+  <form onsubmit="saveCardCutoffs(event)" style="max-width:640px;margin-top:36px;">
+    <h2 class="ff-display" style="font-size:18px;font-weight:600;margin-bottom:4px;">💳 Día de corte de facturación</h2>
+    <p style="font-size:14px;color:${MUTED};margin:0 0 18px;">El día del mes en que cierra la boleta de cada tarjeta. Una compra hecha DESPUÉS de ese día se factura recién el mes siguiente — así el sistema calcula solo en qué boleta cae cada cuota.</p>
+
+    <div class="card config-block">
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        ${CARDS.map(c=>`
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div style="flex:1;font-size:14px;">💳 ${c.name}</div>
+            <input id="cutoff-${c.id}" type="number" min="1" max="31" step="1" class="field ff-mono" style="width:100px;margin-bottom:0;" value="${getCardCutoffDay(c.id)}">
+          </div>`).join("")}
+      </div>
+    </div>
+
+    <button type="submit" class="submit-btn" style="width:auto;padding:11px 22px;">Guardar días de corte</button>
   </form>`;
 }
 
